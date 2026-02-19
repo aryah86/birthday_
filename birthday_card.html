@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Happy Birthday Umasankar</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Anton&display=swap');
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;height:100%;background:#0a0a0a;overflow:hidden;cursor:default;user-select:none;}
+canvas{display:block;position:absolute;top:0;left:0;}
+#grain{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10;opacity:0.12;mix-blend-mode:screen;}
+#ui{position:fixed;bottom:28px;left:0;right:0;text-align:center;z-index:20;pointer-events:none;}
+#hint{font-family:'Space Mono',monospace;font-size:13px;letter-spacing:2px;color:rgba(200,160,80,0.7);transition:opacity 0.8s;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<canvas id="grain"></canvas>
+<div id="ui"><div id="hint">DRAG TO POSITION, THEN TAP THE BALL TO SHOOT</div></div>
+
+<script>
+// ── SETUP ──────────────────────────────────────────────────────────
+const cv=document.getElementById('c'), cx=cv.getContext('2d');
+const W=cv.width=window.innerWidth, H=cv.height=window.innerHeight;
+
+// Riso grain overlay
+const gcv=document.getElementById('grain'), gx=gcv.getContext('2d');
+gcv.width=W; gcv.height=H;
+function renderGrain(){
+  const img=gx.createImageData(W,H);
+  for(let i=0;i<img.data.length;i+=4){
+    const v=Math.random()*50;
+    img.data[i]=img.data[i+1]=img.data[i+2]=v;
+    img.data[i+3]=255;
+  }
+  gx.putImageData(img,0,0);
+}
+renderGrain();
+setInterval(renderGrain,120); // animated grain
+
+// ── CONSTANTS ──────────────────────────────────────────────────────
+const BARCA_BLUE='#1a3c6e';    // deep blaugrana blue
+const BARCA_RED='#8b1a2b';     // garnet maroon
+const BARCA_GOLD='#c9a84c';    // gold accent
+const BARCA_BLUE_L='#2d5a9e';  // lighter blue for halftone
+const BARCA_RED_L='#b32e42';   // lighter red
+
+let T=0;
+const MX=W/2, MY=H/2;
+
+// ── STATE ──────────────────────────────────────────────────────────
+let phase='play'; // play → goal → gift → message
+let goalTimer=0, giftTimer=0, msgTimer=0;
+
+// Goal post
+const goalW=240, goalH=180;
+const goalX=MX-goalW/2, goalY=H*0.18;
+
+// Ball
+const ballStartX=MX, ballStartY=H*0.78;
+let ballX=ballStartX, ballY=ballStartY, ballR=22;
+let dragging=false, dragOX=0, dragOY=0;
+let ballPlaced=false; // ball has been positioned and is ready to shoot
+let shooting=false;   // ball is flying toward goal
+let ballVX=0, ballVY=0;
+let prevBX=ballX, prevBY=ballY;
+
+// Gift box
+let giftScale=0, giftOpen=false;
+// Pre-generate stable texture lines for gift box (avoids per-frame random flicker)
+const giftTexLines=[];
+for(let i=0;i<40;i++){ if(Math.random()>0.4) giftTexLines.push(i*4); }
+
+// Confetti
+let confetti=[];
+
+// ── UTILS ──────────────────────────────────────────────────────────
+const rv=(a,b)=>a+Math.random()*(b-a);
+const ri=(a,b)=>Math.floor(rv(a,b+1));
+const cl=(v,a,b)=>Math.max(a,Math.min(b,v));
+const lp=(a,b,t)=>a+(b-a)*t;
+
+// Riso halftone dots pattern
+function halftone(x,y,spacing,size,color,alpha=1){
+  cx.fillStyle=color;
+  cx.globalAlpha=alpha;
+  const cols=Math.ceil(W/spacing)+2, rows=Math.ceil(H/spacing)+2;
+  const sx=x%(spacing)- spacing, sy=y%(spacing)-spacing;
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const px=sx+c*spacing + (r%2)*spacing*0.5;
+      const py=sy+r*spacing;
+      cx.beginPath();
+      cx.arc(px,py,size,0,Math.PI*2);
+      cx.fill();
+    }
+  }
+  cx.globalAlpha=1;
+}
+
+// Riso misregistration offset text
+function risoText(text,x,y,font,mainCol,offCol,offX=2,offY=-2){
+  cx.font=font;cx.textAlign='center';cx.textBaseline='middle';
+  // offset print (misregistration)
+  cx.fillStyle=offCol;
+  cx.globalAlpha=0.5;
+  cx.fillText(text,x+offX,y+offY);
+  cx.globalAlpha=1;
+  // main print
+  cx.fillStyle=mainCol;
+  cx.fillText(text,x,y);
+}
+
+// ── DRAW HELPERS ───────────────────────────────────────────────────
+
+function drawBarcaStripes(){
+  // Vertical blaugrana stripes — riso style with slight offset
+  const stripeW=W/8;
+  for(let i=0;i<9;i++){
+    const col=i%2===0?BARCA_BLUE:BARCA_RED;
+    cx.fillStyle=col;
+    cx.globalAlpha=0.12;
+    cx.fillRect(i*stripeW-3,0,stripeW,H);
+    cx.globalAlpha=1;
+  }
+}
+
+function drawGoalPost(){
+  const gx2=goalX, gy=goalY, gw=goalW, gh=goalH;
+  const postW=10;
+
+  // Net — halftone pattern inside goal
+  cx.save();
+  cx.beginPath();
+  cx.rect(gx2+postW,gy+postW,gw-postW*2,gh-postW);
+  cx.clip();
+  // crosshatch net
+  cx.strokeStyle=BARCA_GOLD;
+  cx.globalAlpha=0.15;
+  cx.lineWidth=1;
+  for(let i=-gh;i<gw+gh;i+=14){
+    cx.beginPath();cx.moveTo(gx2+i,gy);cx.lineTo(gx2+i+gh,gy+gh);cx.stroke();
+    cx.beginPath();cx.moveTo(gx2+gw-i,gy);cx.lineTo(gx2+gw-i-gh,gy+gh);cx.stroke();
+  }
+  cx.globalAlpha=1;
+  cx.restore();
+
+  // Goal shadow (riso offset)
+  cx.fillStyle=BARCA_RED;
+  cx.globalAlpha=0.3;
+  cx.fillRect(gx2+4+3,gy+3,postW,gh); // left post shadow
+  cx.fillRect(gx2+gw-postW-4+3,gy+3,postW,gh); // right post shadow
+  cx.fillRect(gx2+3,gy+3,gw,postW); // crossbar shadow
+  cx.globalAlpha=1;
+
+  // Goal posts — main
+  cx.fillStyle='#e8e0d0';
+  cx.fillRect(gx2+4,gy,postW,gh); // left
+  cx.fillRect(gx2+gw-postW-4,gy,postW,gh); // right
+  cx.fillRect(gx2,gy,gw,postW); // crossbar
+
+  // Riso texture on posts
+  cx.fillStyle=BARCA_GOLD;
+  cx.globalAlpha=0.2;
+  for(let y2=gy;y2<gy+gh;y2+=6){
+    if(Math.random()<0.3) continue;
+    cx.fillRect(gx2+4,y2,postW,2);
+    cx.fillRect(gx2+gw-postW-4,y2,postW,2);
+  }
+  cx.globalAlpha=1;
+}
+
+function drawBall(x,y,radius){
+  // Ball shadow (riso offset)
+  cx.beginPath();
+  cx.arc(x+3,y+4,radius,0,Math.PI*2);
+  cx.fillStyle=BARCA_RED;
+  cx.globalAlpha=0.35;
+  cx.fill();
+  cx.globalAlpha=1;
+
+  // Ball body
+  cx.beginPath();
+  cx.arc(x,y,radius,0,Math.PI*2);
+  cx.fillStyle='#e8e0d0';
+  cx.fill();
+
+  // Pentagon patches (riso print)
+  cx.fillStyle='#1a1a1a';
+  const patchAngles=[0,1.256,2.513,3.77,5.026];
+  patchAngles.forEach(a=>{
+    const px=x+Math.cos(a+T*0.5)*radius*0.45;
+    const py=y+Math.sin(a+T*0.5)*radius*0.45;
+    cx.beginPath();
+    for(let i=0;i<5;i++){
+      const pa=a+T*0.5+i*Math.PI*2/5;
+      const ppx=px+Math.cos(pa)*radius*0.22;
+      const ppy=py+Math.sin(pa)*radius*0.22;
+      i===0?cx.moveTo(ppx,ppy):cx.lineTo(ppx,ppy);
+    }
+    cx.closePath();cx.fill();
+  });
+
+  // Riso grain on ball
+  cx.beginPath();
+  cx.arc(x,y,radius,0,Math.PI*2);
+  cx.fillStyle=BARCA_GOLD;
+  cx.globalAlpha=0.08;
+  cx.fill();
+  cx.globalAlpha=1;
+}
+
+function drawMessi10(){
+  // Messi #10 shirt silhouette — riso style
+  const sx=W*0.15, sy=H*0.45;
+
+  // Shirt offset (riso misregistration)
+  cx.save();
+  cx.translate(sx+3,sy-2);
+  drawShirtShape(BARCA_RED,0.4);
+  cx.restore();
+
+  // Main shirt
+  cx.save();
+  cx.translate(sx,sy);
+  drawShirtShape(BARCA_BLUE,0.85);
+
+  // Stripes on shirt
+  cx.fillStyle=BARCA_RED;
+  cx.globalAlpha=0.7;
+  for(let i=-30;i<30;i+=12){
+    cx.fillRect(i,-35,5,70);
+  }
+  cx.globalAlpha=1;
+
+  // Number 10
+  risoText('10',0,0,'bold 38px Anton','#e8e0d0',BARCA_GOLD,2,-2);
+  cx.restore();
+
+  // MESSI text
+  risoText('MESSI',sx,sy+62,'bold 16px "Space Mono"',BARCA_GOLD,BARCA_RED_L,2,-1);
+}
+
+function drawShirtShape(color,alpha){
+  cx.fillStyle=color;
+  cx.globalAlpha=alpha;
+  cx.beginPath();
+  cx.moveTo(-25,-40);
+  cx.lineTo(-40,-28);cx.lineTo(-42,-5);cx.lineTo(-28,-5);cx.lineTo(-25,35);
+  cx.lineTo(25,35);cx.lineTo(28,-5);cx.lineTo(42,-5);cx.lineTo(40,-28);
+  cx.lineTo(25,-40);
+  cx.closePath();
+  cx.fill();
+  cx.globalAlpha=1;
+}
+
+function drawMessi10Right(){
+  const sx=W*0.85, sy=H*0.45;
+
+  cx.save();
+  cx.translate(sx+3,sy-2);
+  drawShirtShape(BARCA_RED,0.4);
+  cx.restore();
+
+  cx.save();
+  cx.translate(sx,sy);
+  drawShirtShape(BARCA_BLUE,0.85);
+  cx.fillStyle=BARCA_RED;
+  cx.globalAlpha=0.7;
+  for(let i=-30;i<30;i+=12){
+    cx.fillRect(i,-35,5,70);
+  }
+  cx.globalAlpha=1;
+  risoText('10',0,0,'bold 38px Anton','#e8e0d0',BARCA_GOLD,2,-2);
+  cx.restore();
+
+  risoText('GOAT',sx,sy+62,'bold 16px "Space Mono"',BARCA_GOLD,BARCA_RED_L,2,-1);
+}
+
+// ── GIFT BOX ───────────────────────────────────────────────────────
+function drawGiftBox(){
+  if(giftScale<=0) return;
+  const s=cl(giftScale,0,1);
+  const bw=160*s, bh=140*s;
+  const bx=MX-bw/2, by=MY-bh/2+20;
+
+  cx.save();
+
+  if(!giftOpen){
+    // Box shadow
+    cx.fillStyle=BARCA_RED;
+    cx.globalAlpha=0.35;
+    cx.fillRect(bx+5,by+5,bw,bh);
+    cx.globalAlpha=1;
+
+    // Box body
+    cx.fillStyle=BARCA_BLUE;
+    cx.fillRect(bx,by,bw,bh);
+
+    // Riso texture on box (stable pre-generated lines)
+    cx.fillStyle=BARCA_BLUE_L;
+    cx.globalAlpha=0.3;
+    giftTexLines.forEach(off=>{ if(by+off<by+bh) cx.fillRect(bx,by+off,bw,1.5); });
+    cx.globalAlpha=1;
+
+    // Ribbon vertical
+    cx.fillStyle=BARCA_GOLD;
+    cx.fillRect(bx+bw/2-8,by,16,bh);
+    // Ribbon horizontal
+    cx.fillRect(bx,by+bh/2-8,bw,16);
+
+    // Bow
+    cx.fillStyle=BARCA_GOLD;
+    cx.beginPath();
+    cx.ellipse(MX-20,by-10*s,22*s,14*s,-0.3,0,Math.PI*2);cx.fill();
+    cx.beginPath();
+    cx.ellipse(MX+20,by-10*s,22*s,14*s,0.3,0,Math.PI*2);cx.fill();
+    cx.beginPath();
+    cx.arc(MX,by-5*s,8*s,0,Math.PI*2);cx.fill();
+
+    // Text prompt
+    if(s>0.9){
+      risoText('TAP TO OPEN',MX,by+bh+35,'bold 14px "Space Mono"',BARCA_GOLD,BARCA_RED,1,-1);
+    }
+  }
+
+  cx.restore();
+}
+
+// ── MESSAGE REVEAL ─────────────────────────────────────────────────
+function drawMessage(){
+  if(msgTimer<=0) return;
+  const t=cl(msgTimer,0,1);
+
+  // Dark overlay
+  cx.fillStyle='rgba(10,10,10,'+t*0.85+')';
+  cx.fillRect(0,0,W,H);
+
+  // Card background
+  const cw=Math.min(550,W*0.85), ch=Math.min(380,H*0.7);
+  const cardX=MX-cw/2, cardY=MY-ch/2;
+
+  // Card shadow (riso offset)
+  cx.fillStyle=BARCA_RED;
+  cx.globalAlpha=0.4*t;
+  cx.fillRect(cardX+6,cardY+6,cw,ch);
+  cx.globalAlpha=1;
+
+  // Card
+  cx.fillStyle='#111';
+  cx.globalAlpha=t;
+  cx.fillRect(cardX,cardY,cw,ch);
+
+  // Border
+  cx.strokeStyle=BARCA_GOLD;
+  cx.lineWidth=3;
+  cx.globalAlpha=t*0.8;
+  cx.strokeRect(cardX+10,cardY+10,cw-20,ch-20);
+  cx.globalAlpha=t;
+
+  // Halftone dots border decoration
+  cx.fillStyle=BARCA_RED;
+  cx.globalAlpha=t*0.25;
+  for(let i=0;i<cw;i+=12){
+    cx.beginPath();cx.arc(cardX+i+6,cardY+6,2.5,0,Math.PI*2);cx.fill();
+    cx.beginPath();cx.arc(cardX+i+6,cardY+ch-6,2.5,0,Math.PI*2);cx.fill();
+  }
+  for(let i=0;i<ch;i+=12){
+    cx.beginPath();cx.arc(cardX+6,cardY+i+6,2.5,0,Math.PI*2);cx.fill();
+    cx.beginPath();cx.arc(cardX+cw-6,cardY+i+6,2.5,0,Math.PI*2);cx.fill();
+  }
+  cx.globalAlpha=t;
+
+  // Barca crest area — simplified stripes
+  const crestY=cardY+ch*0.18;
+  cx.save();
+  cx.beginPath();
+  cx.arc(MX,crestY,30*t,0,Math.PI*2);
+  cx.clip();
+  for(let i=0;i<6;i++){
+    cx.fillStyle=i%2===0?BARCA_BLUE:BARCA_RED;
+    cx.fillRect(MX-30+i*10,crestY-30,10,60);
+  }
+  cx.restore();
+  cx.strokeStyle=BARCA_GOLD;cx.lineWidth=2;cx.globalAlpha=t;
+  cx.beginPath();cx.arc(MX,crestY,30*t,0,Math.PI*2);cx.stroke();
+
+  // Stars above crest
+  cx.fillStyle=BARCA_GOLD;
+  cx.globalAlpha=t;
+  drawStar(MX,crestY-44,6,3);
+
+  // Main text
+  const textY=cardY+ch*0.48;
+  risoText('HAPPY BIRTHDAY',MX,textY,`bold ${Math.min(42,cw*0.076)|0}px Anton`,BARCA_GOLD,BARCA_RED_L,3,-2);
+
+  // Name
+  risoText('UMASANKAR',MX,textY+55,`bold ${Math.min(52,cw*0.094)|0}px Anton`,'#e8e0d0',BARCA_BLUE_L,3,-2);
+
+  // Subtitle
+  cx.globalAlpha=t*0.65;
+  risoText('from the Camp Nou with love',MX,textY+105,'14px "Space Mono"',BARCA_GOLD,BARCA_RED,1,-1);
+  cx.globalAlpha=t;
+
+  // Messi #10 on bottom
+  risoText('⚽ 10 ⚽',MX,textY+145,'bold 22px Anton',BARCA_GOLD,BARCA_RED_L,2,-1);
+
+  // ── CLOSE BUTTON ──
+  if(t>0.8){
+    const cbx=cardX+cw-46, cby=cardY+14, cbs=32;
+    // button bg
+    cx.fillStyle=BARCA_RED;
+    cx.globalAlpha=t*0.7;
+    cx.fillRect(cbx,cby,cbs,cbs);
+    // X
+    cx.strokeStyle='#e8e0d0';
+    cx.lineWidth=2.5;
+    cx.globalAlpha=t;
+    cx.beginPath();
+    cx.moveTo(cbx+8,cby+8);cx.lineTo(cbx+cbs-8,cby+cbs-8);
+    cx.moveTo(cbx+cbs-8,cby+8);cx.lineTo(cbx+8,cby+cbs-8);
+    cx.stroke();
+
+    // Replay label below close
+    cx.globalAlpha=t*0.5;
+    risoText('TAP  ✕  TO REPLAY',MX,cardY+ch+30,'11px "Space Mono"',BARCA_GOLD,BARCA_RED,1,-1);
+  }
+
+  cx.globalAlpha=1;
+}
+
+function drawStar(x,y,R,r2){
+  cx.beginPath();
+  for(let i=0;i<10;i++){
+    const a=Math.PI/2+i*Math.PI/5;
+    const rad=i%2===0?R:r2;
+    const px=x+Math.cos(a)*rad, py=y-Math.sin(a)*rad;
+    i===0?cx.moveTo(px,py):cx.lineTo(px,py);
+  }
+  cx.closePath();cx.fill();
+}
+
+// ── CONFETTI ───────────────────────────────────────────────────────
+function spawnConfetti(){
+  const cols=[BARCA_BLUE,BARCA_RED,BARCA_GOLD,'#e8e0d0',BARCA_BLUE_L,BARCA_RED_L];
+  for(let i=0;i<80;i++){
+    confetti.push({
+      x:MX+rv(-120,120),y:goalY+rv(-40,40),
+      vx:rv(-5,5),vy:rv(-8,-1),
+      w:rv(4,10),h:rv(3,8),
+      rot:rv(0,6.28),rv:rv(-0.15,0.15),
+      col:cols[ri(0,cols.length-1)],
+      life:rv(1.5,3.5),age:0
+    });
+  }
+}
+
+function updateConfetti(){
+  confetti=confetti.filter(c=>{
+    c.age+=0.016;
+    c.x+=c.vx; c.y+=c.vy;
+    c.vy+=0.12; c.vx*=0.995;
+    c.rot+=c.rv;
+    return c.age<c.life;
+  });
+}
+
+function drawConfetti(){
+  confetti.forEach(c=>{
+    cx.save();
+    cx.translate(c.x,c.y);cx.rotate(c.rot);
+    cx.fillStyle=c.col;
+    cx.globalAlpha=cl(1-(c.age/c.life),0,1)*0.85;
+    cx.fillRect(-c.w/2,-c.h/2,c.w,c.h);
+    cx.restore();
+  });
+  cx.globalAlpha=1;
+}
+
+// ── FIELD LINES ────────────────────────────────────────────────────
+function drawField(){
+  // Center circle
+  cx.beginPath();
+  cx.arc(MX,MY,70,0,Math.PI*2);
+  cx.strokeStyle=BARCA_GOLD;
+  cx.globalAlpha=0.08;
+  cx.lineWidth=2;
+  cx.stroke();
+
+  // Center dot
+  cx.beginPath();cx.arc(MX,MY,4,0,Math.PI*2);
+  cx.fillStyle=BARCA_GOLD;cx.globalAlpha=0.1;cx.fill();
+
+  // Penalty area
+  cx.strokeStyle=BARCA_GOLD;cx.globalAlpha=0.08;cx.lineWidth=2;
+  cx.strokeRect(MX-130,goalY-10,260,goalH+80);
+
+  cx.globalAlpha=1;
+}
+
+// ── RESET ──────────────────────────────────────────────────────────
+function resetToPlay(){
+  phase='play';
+  goalTimer=0; giftTimer=0; msgTimer=0;
+  giftScale=0; giftOpen=false;
+  ballX=ballStartX; ballY=ballStartY;
+  ballVX=0; ballVY=0;
+  dragging=false; ballPlaced=false; shooting=false;
+  confetti=[];
+  document.getElementById('hint').style.opacity='1';
+}
+
+// ── MOUSE / TOUCH ──────────────────────────────────────────────────
+function getPos(e){
+  const t=e.touches?e.touches[0]:e;
+  const r=cv.getBoundingClientRect();
+  return {x:t.clientX-r.left, y:t.clientY-r.top};
+}
+
+function hitBall(p){
+  const dx=p.x-ballX, dy=p.y-ballY;
+  return Math.sqrt(dx*dx+dy*dy)<ballR*2.8;
+}
+
+// Close button hit area on the message card
+function hitClose(p){
+  const cw=Math.min(550,W*0.85), ch=Math.min(380,H*0.7);
+  const cardX=MX-cw/2, cardY=MY-ch/2;
+  const bx=cardX+cw-46, by=cardY+14, bw=32, bh=32;
+  return p.x>=bx&&p.x<=bx+bw&&p.y>=by&&p.y<=by+bh;
+}
+
+function onDown(e){
+  e.preventDefault();
+  const p=getPos(e);
+
+  // Message screen: close button
+  if(phase==='message'&&msgTimer>0.8){
+    if(hitClose(p)){
+      resetToPlay();
+      return;
+    }
+    return;
+  }
+
+  // Gift box: tap to open
+  if(phase==='gift'&&!giftOpen&&giftScale>0.8){
+    giftOpen=true;
+    phase='message';
+    return;
+  }
+
+  if(phase!=='play') return;
+
+  // If ball is placed (not being dragged), tap to shoot
+  if(ballPlaced&&!dragging&&hitBall(p)){
+    shooting=true;
+    ballPlaced=false;
+    // Aim toward goal center
+    const goalCX=MX, goalCY=goalY+goalH*0.5;
+    const dx=goalCX-ballX, dy=goalCY-ballY;
+    const dist=Math.sqrt(dx*dx+dy*dy);
+    const speed=Math.min(18,dist*0.06);
+    ballVX=(dx/dist)*speed;
+    ballVY=(dy/dist)*speed;
+    return;
+  }
+
+  // Otherwise start dragging to position
+  if(hitBall(p)&&!shooting){
+    dragging=true;
+    ballPlaced=false;
+    dragOX=p.x-ballX; dragOY=p.y-ballY;
+    ballVX=0; ballVY=0;
+  }
+}
+
+function onMove(e){
+  e.preventDefault();
+  if(!dragging||phase!=='play') return;
+  const p=getPos(e);
+  ballX=p.x-dragOX;
+  ballY=p.y-dragOY;
+}
+
+function onUp(e){
+  if(!dragging) return;
+  dragging=false;
+  // Ball is now placed — ready to be tapped to shoot
+  ballPlaced=true;
+  ballVX=0; ballVY=0;
+}
+
+cv.addEventListener('mousedown',onDown);
+cv.addEventListener('mousemove',onMove);
+cv.addEventListener('mouseup',onUp);
+cv.addEventListener('touchstart',onDown,{passive:false});
+cv.addEventListener('touchmove',onMove,{passive:false});
+cv.addEventListener('touchend',onUp);
+
+// ── UPDATE ─────────────────────────────────────────────────────────
+function update(){
+  T+=0.016;
+  updateConfetti();
+
+  if(phase==='play'){
+    if(shooting){
+      ballX+=ballVX; ballY+=ballVY;
+      // slight gravity arc
+      ballVY+=0.04;
+      // Check goal
+      if(ballX>goalX+20&&ballX<goalX+goalW-20&&ballY>goalY+10&&ballY<goalY+goalH-10){
+        phase='goal';
+        goalTimer=0;
+        shooting=false;
+        spawnConfetti();
+        document.getElementById('hint').style.opacity='0';
+      }
+      // Missed — went off screen or past goal
+      if(ballY<-50||ballX<-50||ballX>W+50||ballY>H+50){
+        // Reset ball position
+        shooting=false;
+        ballPlaced=false;
+        ballX=ballStartX; ballY=ballStartY;
+        ballVX=0; ballVY=0;
+      }
+    }
+  }
+
+  if(phase==='goal'){
+    goalTimer+=0.016;
+    // Ball settles into net
+    ballVX*=0.9;ballVY*=0.9;
+    ballX=lp(ballX,MX,0.03);
+    ballY=lp(ballY,goalY+goalH*0.55,0.03);
+
+    if(goalTimer>2.2){
+      phase='gift';
+      giftTimer=0;
+    }
+  }
+
+  if(phase==='gift'){
+    giftTimer+=0.016;
+    giftScale=cl(giftTimer/0.8,0,1);
+    // Ease out
+    giftScale=1-Math.pow(1-giftScale,3);
+  }
+
+  if(phase==='message'){
+    msgTimer=cl(msgTimer+0.025,0,1);
+  }
+}
+
+// ── DRAW ───────────────────────────────────────────────────────────
+function draw(){
+  cx.clearRect(0,0,W,H);
+
+  // Black background
+  cx.fillStyle='#0a0a0a';
+  cx.fillRect(0,0,W,H);
+
+  drawBarcaStripes();
+  drawField();
+
+  // Title — riso printed
+  if(phase==='play'||phase==='goal'){
+    risoText('FCB',MX,H*0.07,'bold 24px Anton',BARCA_GOLD,BARCA_RED,2,-2);
+  }
+
+  drawGoalPost();
+
+  // Messi shirts on sides
+  if(phase==='play'||phase==='goal'){
+    drawMessi10();
+    drawMessi10Right();
+  }
+
+  // GOAL text flash
+  if(phase==='goal'){
+    const flash=Math.sin(goalTimer*8)*0.5+0.5;
+    cx.globalAlpha=flash;
+    risoText('GOOOAL!',MX,MY+30,`bold ${Math.min(80,W*0.09)|0}px Anton`,BARCA_GOLD,BARCA_RED,4,-3);
+    cx.globalAlpha=1;
+  }
+
+  drawConfetti();
+
+  // Ball (hide after gift appears)
+  if(phase!=='gift'&&phase!=='message'){
+    drawBall(ballX,ballY,ballR);
+
+    // "TAP TO SHOOT" prompt when ball is placed
+    if(phase==='play'&&ballPlaced&&!shooting){
+      const pulse=0.5+0.5*Math.sin(T*4);
+      cx.globalAlpha=pulse*0.85;
+      risoText('TAP TO SHOOT!',ballX,ballY-ballR-22,'bold 14px "Space Mono"',BARCA_GOLD,BARCA_RED,1,-1);
+      cx.globalAlpha=1;
+    }
+  }
+
+  drawGiftBox();
+  drawMessage();
+
+  // Bottom riso decoration dots
+  cx.fillStyle=BARCA_RED;
+  cx.globalAlpha=0.15;
+  for(let x=0;x<W;x+=18){
+    cx.beginPath();
+    cx.arc(x+9,H-12,2.5,0,Math.PI*2);
+    cx.fill();
+  }
+  cx.globalAlpha=1;
+}
+
+// ── LOOP ───────────────────────────────────────────────────────────
+(function loop(){update();draw();requestAnimationFrame(loop);})();
+</script>
+</body>
+</html>
